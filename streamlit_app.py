@@ -12,15 +12,28 @@ load_dotenv()
 
 
 # ---- Constants (copied from main.py) ----
-APPLICANT_INFO = """
+APPLICANT_INFO_COUPLE = """
 Wir sind Nils (26) und Minh-Kha (30). Gemeinsam verfügen wir über ein gesichertes 
 monatliches Nettoeinkommen von ca. 9.000 € – beide ruhige, zuverlässige, Nichtraucher 
 ohne Haustiere. Nils arbeitet als Unternehmensberater bei Bain, Minh-Kha startet im 
 Februar bei Celonis und zieht dafür aus Zürich nach München.
 """.strip()
 
+APPLICANT_INFO_SINGLE = """
+Ich bin Minh-Kha (30), starte ab Februar bei Celonis und ziehe dafür aus Zürich nach München. 
+Darüber hinaus verfüge ich über ein gesichertes monatliches Nettoeinkommen von ca. 4.500 € und 
+bin ein ruhiger, zuverlässiger Nichtraucher ohne Haustiere.
+""".strip()
+
 WEBSITE_INFO = """
 Um Ihnen einen schnellen Überblick zu ermöglichen, haben wir eine kleine Website mit allen Unterlagen zu uns eingerichtet:
+https://nils-und-minhkha.lovable.app
+
+Passwort für den Dokumentenbereich: NiMi!2026
+""".strip()
+
+WEBSITE_INFO_SINGLE = """
+Um Ihnen einen schnellen Überblick zu ermöglichen, habe ich eine kleine Website mit allen Unterlagen zu mir eingerichtet:
 https://nils-und-minhkha.lovable.app
 
 Passwort für den Dokumentenbereich: NiMi!2026
@@ -38,11 +51,14 @@ def _get_secret(name: str) -> str | None:
     if val:
         return val
     try:
-        # st.secrets acts like a dict; missing key raises.
-        v = st.secrets.get(name)  # type: ignore[attr-defined]
-        return str(v) if v else None
-    except Exception:
+        secrets = st.secrets  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        # Streamlit not fully initialized (or secrets unavailable)
         return None
+    if name in secrets:
+        v = secrets.get(name)
+        return str(v) if v else None
+    return None
 
 
 @st.cache_resource(show_spinner=False)
@@ -120,31 +136,64 @@ Listing content:
     }
 
 
-def generate_reply(listing_info: dict[str, Any], max_words: int = 150, include_website: bool = True) -> str:
+def generate_reply(
+    listing_info: dict[str, Any],
+    *,
+    max_words: int = 150,
+    include_website: bool = True,
+    applicant_profile: str = "couple",
+    custom_prompt: str | None = None,
+) -> str:
     firecrawl, openai_client = _get_clients()
     _ = firecrawl  # unused here, but kept to ensure secrets validation is consistent
+    if applicant_profile not in {"couple", "single"}:
+        raise ValueError("Invalid applicant_profile. Use 'couple' or 'single'.")
 
-    website_section = WEBSITE_INFO if include_website else ""
+    if applicant_profile == "single":
+        applicant_info = APPLICANT_INFO_SINGLE
+        website_section = WEBSITE_INFO_SINGLE if include_website else ""
+        about_label = "About me"
+        sign_off = """
+        Viele Grüße, 
+        Minh-Kha
+        """
+        pronoun_de = "ich"
+    else:
+        applicant_info = APPLICANT_INFO_COUPLE
+        website_section = WEBSITE_INFO if include_website else ""
+        about_label = "About us"
+        sign_off = """
+        Viele Grüße, 
+        Nils & Minh-Kha
+        """
+        pronoun_de = "wir"
+
+    custom_prompt = (custom_prompt or "").strip()
+    additional_instructions = (
+        f"\n\nADDITIONAL USER INSTRUCTIONS (optional; follow these as long as they don't violate the structure/rules above):\n{custom_prompt}"
+        if custom_prompt
+        else ""
+    )
 
     reply_prompt = f"""
 Based on the following apartment listing, write a short application message in German.
 
 STRICT STRUCTURE (follow this order):
 1. Salutation (e.g., "Guten Tag," or "Guten Morgen,")
-2. Why we like this specific listing (1-2 sentences, mention specific features from the listing)
-3. About us (use the provided info, keep it brief)
+2. Why we like this specific listing (1-2 sentences, mention specific features from the listing; adapt to {pronoun_de})
+3. {about_label} (use the provided info, keep it brief)
 4. Administrative stuff (moving-in date handling - see rules below)
 5. {"Our website paragraph (include exactly as provided)" if include_website else "Skip this section"}
-6. Closing (express hope to hear back and see the apartment, sign off with "Viele Grüße, Nils & Minh-Kha")
+6. Closing (express hope to hear back and see the apartment, sign off with "{sign_off}")
 
 MOVING-IN DATE RULES (very important):
 - Our ideal move-in date is {IDEAL_MOVE_IN}
-- If the listing's move-in date is EARLIER than {IDEAL_MOVE_IN}: mention that we are flexible regarding the earlier date
-- If the listing's move-in date is LATER than {IDEAL_MOVE_IN}: mention that the stated date works perfectly for us
+- If the listing's move-in date is EARLIER than {IDEAL_MOVE_IN}: mention that {pronoun_de} flexibel bezüglich des früheren Datums bin/sind (grammatically correct)
+- If the listing's move-in date is LATER than {IDEAL_MOVE_IN}: mention that das genannte Datum für {pronoun_de} perfekt passt
 - If there is NO move-in date mentioned: mention that ideally we would move in around {IDEAL_MOVE_IN}
 
-ABOUT US (use this info):
-{APPLICANT_INFO}
+{about_label.upper()} (use this info):
+{applicant_info}
 
 {f"WEBSITE SECTION (include this exactly if the listing mentions required documents like SCHUFA, income proof, etc.):{os.linesep}{website_section}" if include_website else ""}
 
@@ -157,6 +206,7 @@ STYLE GUIDELINES:
 
 LISTING INFORMATION:
 {listing_info["extracted_info"]}
+{additional_instructions}
 
 Now write the message:
 """.strip()
@@ -168,7 +218,7 @@ Now write the message:
                 "role": "system",
                 "content": """You are an expert at writing German apartment application letters.
 Write concise, warm, and professional messages. Follow the structure exactly as specified.
-Always sign off as "Nils & Minh-Kha". Never use "Sie-Form" excessively - keep it natural.""",
+Always use the provided sign-off exactly. Never use "Sie-Form" excessively - keep it natural.""",
             },
             {"role": "user", "content": reply_prompt},
         ],
@@ -189,13 +239,28 @@ st.write("Füge einen Immobilienscout24-Link ein, setze die Parameter, und erhal
 
 with st.sidebar:
     st.subheader("Einstellungen")
+    applicant_label = st.radio(
+        "Suchende",
+        options=["Nils & Minh-Kha", "Minh-Kha"],
+        index=0,
+        horizontal=False,
+    )
+    applicant_profile = "single" if applicant_label != "Nils & Minh-Kha" else "couple"
     max_words = st.slider("Max. Wörter", min_value=60, max_value=250, value=150, step=10)
     include_website = st.checkbox("Website/Unterlagen-Abschnitt zulassen", value=True)
     show_extracted = st.checkbox("Extrahierte Listing-Infos anzeigen", value=False)
+    custom_prompt = st.text_area(
+        "Custom Prompt (optional)",
+        placeholder="z.B. etwas weniger formell, kürzer, erwähne Homeoffice, bitte mit Du-Form, etc.",
+        height=120,
+    )
     st.divider()
     st.caption("Secrets erwartet: `OPENAI_API_KEY` und `FIRECRAWL_API_KEY` (Environment oder Streamlit Secrets).")
 
-url = st.text_input("Immobilienscout24 URL", placeholder="https://www.immobilienscout24.de/expose/123456789")
+input_url = st.text_input(
+    "Immobilienscout24 URL",
+    placeholder="https://www.immobilienscout24.de/expose/123456789",
+)
 
 col1, col2 = st.columns([1, 1])
 with col1:
@@ -216,31 +281,37 @@ if missing:
 
 if run:
     st.session_state.pop("last_error", None)
-    if not url or not url.strip():
+    if not input_url or not input_url.strip():
         st.session_state["last_error"] = "Bitte eine URL eingeben."
     else:
-        url = url.strip()
+        listing_url = input_url.strip()
         try:
             with st.spinner("Scrape & Extraktion läuft…"):
-                listing_info = extract_listing_info(url)
+                extracted_listing = extract_listing_info(listing_url)
             with st.spinner("Nachricht wird geschrieben…"):
-                reply = generate_reply(listing_info, max_words=max_words, include_website=include_website)
+                reply = generate_reply(
+                    extracted_listing,
+                    max_words=max_words,
+                    include_website=include_website,
+                    applicant_profile=applicant_profile,
+                    custom_prompt=custom_prompt,
+                )
             st.session_state["last_result"] = {
-                "url": url,
-                "listing_info": listing_info,
+                "url": listing_url,
+                "listing_info": extracted_listing,
                 "reply": reply,
             }
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             st.session_state["last_error"] = str(e)
 
 if err := st.session_state.get("last_error"):
     st.error(err)
 
-result = st.session_state.get("last_result")
-if result:
+last_result = st.session_state.get("last_result")
+if last_result:
     if show_extracted:
         with st.expander("Extrahierte Listing-Informationen", expanded=False):
-            st.text(result["listing_info"]["extracted_info"])
+            st.text(last_result["listing_info"]["extracted_info"])
 
     st.subheader("Generierte Nachricht")
-    st.text_area("Zum Kopieren", value=result["reply"], height=260)
+    st.text_area("Zum Kopieren", value=last_result["reply"], height=260)
